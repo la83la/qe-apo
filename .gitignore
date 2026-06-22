@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.ipynb_checkpoints/
+
+# Virtual env (12G, 不上傳)
+merge_venv/
+.venv/
+venv/
+
+# Stage1 expansion 快取 / 跑出來的結果
+cache/
+runs/
+*.log
+
+# HF / model 快取(本就在 ~/.cache,保險起見)
+.cache/
+*.safetensors
+*.bin
+
+# OS
+.DS_Store

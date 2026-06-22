@@ -1,0 +1,2 @@
+ENV: source /mnt/raid0/home/lalako/MERGE/merge_venv/bin/activate
+* remind uv!!!   
