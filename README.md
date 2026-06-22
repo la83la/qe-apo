@@ -1,4 +1,5 @@
-# qe-apo — Multi-model Query Expansion + Ensemble + APO
+# qe-apo 
+<!--— Multi-model Query Expansion + Ensemble + APO-->
 
 Research scaffold: **Stage1** performs query expansion with multiple (heterogeneous)
 models, **Stage2** applies rank-level ensemble (RRF) over the results, and **APO
