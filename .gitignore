@@ -21,3 +21,7 @@ runs/
 
 # OS
 .DS_Store
+
+# 不上傳的實驗計畫
+EXPERIMENT_PLAN.md
+
