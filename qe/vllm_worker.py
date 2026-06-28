@@ -38,6 +38,8 @@ def main():
     ap.add_argument("--model", required=True)
     ap.add_argument("--dataset", default="beir/scifact/test")
     ap.add_argument("--prompt-file", default="")
+    ap.add_argument("--messages-file", default="",
+                    help="若給定: 直接讀 {qid: user_message} 生成(Stage2 融合用),不碰 dataset/template")
     ap.add_argument("--out", required=True)
     ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--max-tokens", type=int, default=256)
@@ -46,15 +48,25 @@ def main():
     ap.add_argument("--max-model-len", type=int, default=4096)
     args = ap.parse_args()
 
-    prompt_tmpl = DEFAULT_EXPAND_PROMPT
-    if args.prompt_file and Path(args.prompt_file).exists():
-        prompt_tmpl = Path(args.prompt_file).read_text()
+    # 兩種輸入來源:
+    #   messages-file: Stage2 融合 — 直接給每個 qid 完整的 user message
+    #   否則         : Stage1 expansion — 從 dataset 取 query 套 prompt template
+    if args.messages_file:
+        with open(args.messages_file) as f:
+            qid_to_msg: dict[str, str] = json.load(f)
+        qids = list(qid_to_msg.keys())
+        user_msgs = [qid_to_msg[qid] for qid in qids]
+    else:
+        prompt_tmpl = DEFAULT_EXPAND_PROMPT
+        if args.prompt_file and Path(args.prompt_file).exists():
+            prompt_tmpl = Path(args.prompt_file).read_text()
 
-    ds = load_ir(args.dataset)
-    queries = ds.queries
-    if args.limit:
-        queries = dict(list(queries.items())[: args.limit])
-    qids = list(queries.keys())
+        ds = load_ir(args.dataset)
+        queries = ds.queries
+        if args.limit:
+            queries = dict(list(queries.items())[: args.limit])
+        qids = list(queries.keys())
+        user_msgs = [prompt_tmpl.format(query=queries[qid]) for qid in qids]
 
     # 延遲 import,讓 --help 不需要 vLLM
     from vllm import LLM, SamplingParams
@@ -69,16 +81,14 @@ def main():
     tok = llm.get_tokenizer()
 
     # 套各 model 自己的 chat template
-    prompts = []
-    for qid in qids:
-        user_msg = prompt_tmpl.format(query=queries[qid])
-        prompts.append(
-            tok.apply_chat_template(
-                [{"role": "user", "content": user_msg}],
-                tokenize=False,
-                add_generation_prompt=True,
-            )
+    prompts = [
+        tok.apply_chat_template(
+            [{"role": "user", "content": user_msg}],
+            tokenize=False,
+            add_generation_prompt=True,
         )
+        for user_msg in user_msgs
+    ]
 
     sp = SamplingParams(temperature=args.temperature, max_tokens=args.max_tokens, seed=0)
     outputs = llm.generate(prompts, sp)
