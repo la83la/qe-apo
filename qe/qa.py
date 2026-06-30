@@ -129,8 +129,12 @@ def _select_passages(ex: QAExample, method: str, k: int, idx: BM25Index,
 
 
 def run_qa_eval(dataset, split, limit, k, methods, reader_kind, reader_model,
-                gpu, expand_models, force=False):
-    """跑 QA 方法,回傳 {method: {em, f1}}。CLI(main)與彙整 script 共用。"""
+                gpu, expand_models, force=False, gpu_mem_util=0.45):
+    """跑 QA 方法,回傳 {method: {em, f1}}。CLI(main)與彙整 script 共用。
+
+    gpu_mem_util: vLLM 的 gpu_memory_utilization。共享 GPU 上請壓低(預設 0.45),
+    避免吃滿整張卡把別人的 process 擠掉/OOM。16GB 卡 0.45≈7.2GB。
+    """
     print(f"載入 QA {dataset} [{split}] ...")
     examples = load_qa(dataset, split=split, limit=limit)
     print(" ", summary(examples))
@@ -141,12 +145,14 @@ def run_qa_eval(dataset, split, limit, k, methods, reader_kind, reader_model,
         tag = f"qa-{split}-{limit or 'full'}"
         if reader_kind == "vllm":
             print(f"Stage1: 在 GPU {gpu} 對 QA 問題跑 expansion {models}")
-            expanders = build_qa_expanders(examples, models, gpu, tag, force=force)
+            expanders = build_qa_expanders(examples, models, gpu, tag,
+                                           gpu_mem_util=gpu_mem_util, force=force)
         else:
             print("Stage1: reader=mock → M1/M2 改用 mock expander(非真 expansion)")
             expanders = expand.build_expanders(None)
 
-    rdr = reader.build_reader(reader_kind, model=reader_model, gpu=gpu) \
+    rdr = reader.build_reader(reader_kind, model=reader_model, gpu=gpu,
+                              gpu_mem_util=gpu_mem_util) \
         if reader_kind == "vllm" else reader.build_reader(reader_kind)
     print(f"reader: {rdr.name}  methods: {methods}")
 
@@ -185,13 +191,15 @@ def main():
     ap.add_argument("--reader-model", default="Qwen/Qwen2.5-3B-Instruct")
     ap.add_argument("--gpu", type=int, default=5, help="vLLM reader / expansion 用的 GPU")
     ap.add_argument("--expand-models", default="", help="逗號分隔;留空用 DEFAULT_QA_EXPAND_MODELS")
+    ap.add_argument("--gpu-mem-util", type=float, default=0.45,
+                    help="vLLM gpu_memory_utilization;共享卡壓低免擠掉別人(16GB 卡 0.45≈7.2GB)")
     ap.add_argument("--force", action="store_true", help="忽略快取重跑")
     args = ap.parse_args()
 
     methods = args.methods.split(",")
     results = run_qa_eval(args.dataset, args.split, args.limit, args.k, methods,
                           args.reader, args.reader_model, args.gpu,
-                          args.expand_models, args.force)
+                          args.expand_models, args.force, args.gpu_mem_util)
 
     print("\n===== QA 對照表 =====")
     names = ["em", "f1"]

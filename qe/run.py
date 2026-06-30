@@ -53,22 +53,24 @@ def _ensemble_run(index, queries, k, expanders, stage2: Stage2Config):
     return ensemble.rrf(runs, top_k=k)
 
 
-def run_b0(index, queries, qrels, k):
-    return metrics.score(qrels, index.search(queries, k=k))
+def run_b0(index, queries, qrels, k, eval_metrics=None, rel_threshold=1):
+    return metrics.score(qrels, index.search(queries, k=k), eval_metrics, rel_threshold)
 
 
-def run_m1(index, queries, qrels, k, expanders):
+def run_m1(index, queries, qrels, k, expanders, eval_metrics=None, rel_threshold=1):
     exp = expanders[0]
     eq = _expand_queries(exp, queries)
-    return metrics.score(qrels, index.search(eq, k=k))
+    return metrics.score(qrels, index.search(eq, k=k), eval_metrics, rel_threshold)
 
 
-def run_m2(index, queries, qrels, k, expanders, stage2: Stage2Config):
+def run_m2(index, queries, qrels, k, expanders, stage2: Stage2Config,
+           eval_metrics=None, rel_threshold=1):
     fused = _ensemble_run(index, queries, k, expanders, stage2)
-    return metrics.score(qrels, fused)
+    return metrics.score(qrels, fused, eval_metrics, rel_threshold)
 
 
-def run_m5(index, queries, qrels, k, expanders, dev_queries, dev_qrels, stage2: Stage2Config):
+def run_m5(index, queries, qrels, k, expanders, dev_queries, dev_qrels, stage2: Stage2Config,
+           eval_metrics=None, rel_threshold=1):
     """對每個 expander 用 APO 在 dev 上挑 prompt, 再在 test 上 RRF。
     mock expander 不吃 prompt, 所以 APO 在此只是示範流程; 接上 Anthropic 後才會真正生效。
     """
@@ -85,27 +87,45 @@ def run_m5(index, queries, qrels, k, expanders, dev_queries, dev_qrels, stage2: 
             print(f"  [APO] {exp.name}: dev ndcg@10 -> {res.best_score:.4f}")
         optimized.append(exp)
     fused = _ensemble_run(index, queries, k, optimized, stage2)
-    return metrics.score(qrels, fused)
+    return metrics.score(qrels, fused, eval_metrics, rel_threshold)
 
 
-def run_ir(dataset, methods, k, limit, models, local_gpu, stage1_models, stage2: Stage2Config):
-    """跑 IR 方法,回傳 {method: {metric: value}}。CLI(main)與彙整 script 共用。"""
+def run_ir(dataset, methods, k, limit, models, local_gpu, stage1_models, stage2: Stage2Config,
+           index_cache: str = "cache/bm25_index"):
+    """跑 IR 方法,回傳 {method: {metric: value}}。CLI(main)與彙整 script 共用。
+
+    BM25 索引快取在 index_cache/<corpus>; MS MARCO 8.8M corpus 建一次後
+    dev/dl19/dl20 共用, 不必重建。索引存在時跳過掃 corpus。
+    """
+    from pathlib import Path
+
+    from qe import data as _data
+
+    cache_path = Path(index_cache) / _data.corpus_cache_key(dataset)
+    cached = (cache_path / "doc_ids.json").exists()
+
     print(f"載入 {dataset} ...")
-    ds = load_ir(dataset)
+    ds = load_ir(dataset, with_corpus=not cached)
     print(" ", ds.summary())
+    eval_metrics = ds.eval["metrics"]
+    rel_threshold = ds.eval["rel_threshold"]
+    print(f"  metrics={eval_metrics}  rel_threshold={rel_threshold}")
 
     queries = ds.queries
     if limit:
         queries = dict(list(queries.items())[:limit])
 
-    print("建 BM25 index ...")
-    index = BM25Index(ds.corpus)
+    print(f"建/載入 BM25 index -> {cache_path} ...")
+    index = BM25Index.load_or_build(ds.corpus, cache_path)
 
     if local_gpu >= 0:
         from qe import stage1
         local_models = [m for m in stage1_models.split(",") if m] or stage1.DEFAULT_MODELS
+        # OOD(BEIR)用 Exp4Fuse Appendix A.1 的 per-dataset 指令; in-domain 回退 DEFAULT
+        prompt = _data.expand_instruction(dataset)
         print(f"Stage1: 本地 vLLM 在 GPU {local_gpu} 跑 {local_models}")
-        paths = stage1.run_stage1(dataset, local_gpu, local_models, limit=limit)
+        print(f"  expansion 指令: {prompt!r}")
+        paths = stage1.run_stage1(dataset, local_gpu, local_models, prompt=prompt, limit=limit)
         expanders = expand.load_cached_expanders(paths)
     else:
         model_ids = [m for m in models.split(",") if m] or None
@@ -121,14 +141,16 @@ def run_ir(dataset, methods, k, limit, models, local_gpu, stage1_models, stage2:
     for m in methods:
         print(f"\n>>> {m}")
         if m == "B0":
-            results[m] = run_b0(index, queries, ds.qrels, k)
+            results[m] = run_b0(index, queries, ds.qrels, k, eval_metrics, rel_threshold)
         elif m == "M1":
-            results[m] = run_m1(index, queries, ds.qrels, k, expanders)
+            results[m] = run_m1(index, queries, ds.qrels, k, expanders, eval_metrics, rel_threshold)
         elif m == "M2":
-            results[m] = run_m2(index, queries, ds.qrels, k, expanders, stage2)
+            results[m] = run_m2(index, queries, ds.qrels, k, expanders, stage2,
+                                eval_metrics, rel_threshold)
         elif m == "M5":
             # 簡化: 用同一份 queries 當 dev (正式實驗請改成獨立 dev split)
-            results[m] = run_m5(index, queries, ds.qrels, k, expanders, queries, ds.qrels, stage2)
+            results[m] = run_m5(index, queries, ds.qrels, k, expanders, queries, ds.qrels,
+                                stage2, eval_metrics, rel_threshold)
         else:
             print(f"  (未知方法 {m}, 跳過)")
             continue
@@ -138,8 +160,10 @@ def run_ir(dataset, methods, k, limit, models, local_gpu, stage1_models, stage2:
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--dataset", default="beir/scifact/test")
-    ap.add_argument("--k", type=int, default=100)
+    ap.add_argument("--dataset", default="beir/scifact/test",
+                    help="友善代號 msmarco-dev/dl19/dl20, 或 ir_datasets id(beir/scifact/test ...)")
+    ap.add_argument("--k", type=int, default=1000,
+                    help="檢索深度; 對齊 Exp4Fuse 的 R@1k 需用 1000")
     ap.add_argument("--methods", default="B0,M1,M2,M5")
     ap.add_argument("--limit", type=int, default=0, help="只取前 N 個 query (除錯用)")
     ap.add_argument("--models", default="", help="逗號分隔的 Anthropic model id; 留空用 mock")
@@ -173,7 +197,8 @@ def main():
                      args.local_gpu, args.stage1_models, stage2)
 
     print("\n===== 對照表 =====")
-    metric_names = metrics.DEFAULT_METRICS
+    from qe import data as _data
+    metric_names = _data.eval_config(args.dataset)["metrics"]
     print(f"{'method':8}" + "".join(f"{mn:>14}" for mn in metric_names))
     for m, sc in results.items():
         print(f"{m:8}" + "".join(f"{sc.get(mn, 0):>14.4f}" for mn in metric_names))

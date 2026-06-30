@@ -61,7 +61,8 @@ def main():
         if args.prompt_file and Path(args.prompt_file).exists():
             prompt_tmpl = Path(args.prompt_file).read_text()
 
-        ds = load_ir(args.dataset)
+        # Stage1 只需要 queries; with_corpus=False 避免掃大 corpus(MS MARCO 8.8M)
+        ds = load_ir(args.dataset, with_corpus=False)
         queries = ds.queries
         if args.limit:
             queries = dict(list(queries.items())[: args.limit])
